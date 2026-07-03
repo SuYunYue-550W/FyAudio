@@ -1,5 +1,5 @@
 // FyAudio 音频处理模块
-// 跨平台 AAC 编码/解码、PCM 音频处理
+// PCM 音频处理（AAC 等编解码器暂不支持，默认使用 PCM 透传）
 package audio
 
 import (
@@ -17,12 +17,12 @@ import (
 // ============================================================================
 
 const (
-	SampleRate   = 44100
-	Channels     = 2
+	SampleRate    = 44100
+	Channels      = 2
 	BitsPerSample = 16
-	FrameDuration = 20 // ms
-	FrameSamples  = SampleRate * FrameDuration / 1000 // 882 samples @ 44100Hz
-	PCMTotalBytes = FrameSamples * Channels * (BitsPerSample / 8) // 3528 bytes
+	FrameDuration = 20                                                  // ms
+	FrameSamples  = SampleRate * FrameDuration / 1000                   // 882 samples @ 44100Hz
+	PCMTotalBytes = FrameSamples * Channels * (BitsPerSample / 8)       // 3528 bytes
 )
 
 // ============================================================================
@@ -46,7 +46,7 @@ type AudioPlayer interface {
 	SetVolume(volume int) // 0-100
 }
 
-// AudioEncoder 音频编码器（AAC）
+// AudioEncoder 音频编码器（PCM 透传模式）
 type AudioEncoder struct {
 	sampleRate int
 	channels   int
@@ -54,24 +54,25 @@ type AudioEncoder struct {
 	frameSize  int
 }
 
-// AudioDecoder 音频解码器（AAC）
+// AudioDecoder 音频解码器（PCM 透传模式）
 type AudioDecoder struct {
 	sampleRate int
 	channels   int
 }
 
-// AACFrameHandler AAC帧处理
-type AACFrameHandler struct {
-	encoder *AudioEncoder
-	decoder *AudioDecoder
-	onFrame func(payload []byte, timestamp uint64) // 编码完成回调
-	quit    chan struct{}
-	wg      sync.WaitGroup
+// FrameHandler 音频帧处理器
+type FrameHandler struct {
+	encoder    *AudioEncoder
+	decoder    *AudioDecoder
+	playbackCh chan *protocol.AudioFramePacket // 接收端播放队列
+	quit       chan struct{}
+	stopOnce   sync.Once
+	wg         sync.WaitGroup
 }
 
 // PCMBuffer PCM音频缓冲
 type PCMBuffer struct {
-	samples []int16      // 立体声交错样本
+	samples []int16 // 立体声交错样本
 	mu      sync.Mutex
 }
 
@@ -79,46 +80,27 @@ type PCMBuffer struct {
 // AudioEncoder 编码器
 // ============================================================================
 
-// NewAudioEncoder 创建AAC编码器
-// 注意：实际编码依赖 FFmpeg（通过系统调用）
+// NewAudioEncoder 创建编码器
+// PCM 模式直接透传，AAC 等编解码器暂不支持
 func NewAudioEncoder(sampleRate, channels, bitrate int) *AudioEncoder {
 	return &AudioEncoder{
 		sampleRate: sampleRate,
 		channels:   channels,
 		bitrate:    bitrate,
-		frameSize:  sampleRate * channels * (bitsPerSample() / 8) * FrameDuration / 1000,
+		frameSize:  sampleRate * channels * (BitsPerSample / 8) * FrameDuration / 1000,
 	}
 }
 
-// bitsPerSample 返回采样位数
-func bitsPerSample() int { return 16 }
-
-// Encode 将PCM数据编码为AAC帧
-// 返回: AAC帧数据（已包含ADTS头）
+// Encode 将PCM数据编码
+// PCM 模式直接透传（补齐/截断到帧大小）
 func (e *AudioEncoder) Encode(pcm []byte) ([]byte, error) {
-	// 校验PCM长度
-	expectedLen := e.frameSize
-	if len(pcm) < expectedLen {
-		// 填充静音
-		padding := make([]byte, expectedLen-len(pcm))
-		for i := range padding {
-			padding[i] = 0
-		}
+	expected := e.frameSize
+	if len(pcm) < expected {
+		padding := make([]byte, expected-len(pcm))
 		pcm = append(pcm, padding...)
+	} else if len(pcm) > expected {
+		pcm = pcm[:expected]
 	}
-
-	// TODO: 实际调用 FFmpeg 命令行工具进行 AAC 编码
-	// macOS/Linux: ffmpeg -f s16le -ar 44100 -ac 2 -i - -c:a aac -b:a 128k -frames:a 1 -f adts -
-	// Windows: 通过 FFmpeg Go bindings 或 subprocess 调用
-	// 这里返回占位数据，实际项目需要接入 FFmpeg
-	return e.encodeWithFFmpeg(pcm)
-}
-
-// encodeWithFFmpeg 通过FFmpeg执行AAC编码
-func (e *AudioEncoder) encodeWithFFmpeg(pcm []byte) ([]byte, error) {
-	// 占位实现
-	// 真实实现需要使用 FFmpeg C bindings (avcodec) 或 subprocess
-	// 这里模拟返回编码后的数据（实际为压缩噪声）
 	return pcm, nil
 }
 
@@ -131,7 +113,7 @@ func (e *AudioEncoder) FrameSize() int {
 // AudioDecoder 解码器
 // ============================================================================
 
-// NewAudioDecoder 创建AAC解码器
+// NewAudioDecoder 创建解码器
 func NewAudioDecoder(sampleRate, channels int) *AudioDecoder {
 	return &AudioDecoder{
 		sampleRate: sampleRate,
@@ -139,36 +121,28 @@ func NewAudioDecoder(sampleRate, channels int) *AudioDecoder {
 	}
 }
 
-// Decode 解码AAC帧为PCM
-// 输入: AAC帧数据（带ADTS头）
-// 输出: PCM原始音频
-func (d *AudioDecoder) Decode(aac []byte) ([]byte, error) {
-	// TODO: 实际调用 FFmpeg 解码
-	// 真实实现使用 FFmpeg API: avcodec_send_packet / avcodec_receive_frame
-	return d.decodeWithFFmpeg(aac)
-}
-
-// decodeWithFFmpeg 通过FFmpeg执行解码
-func (d *AudioDecoder) decodeWithFFmpeg(aac []byte) ([]byte, error) {
-	// 占位实现
-	return aac, nil
+// Decode 解码为PCM
+// PCM 模式直接透传
+func (d *AudioDecoder) Decode(data []byte) ([]byte, error) {
+	return data, nil
 }
 
 // ============================================================================
-// AACFrameHandler AAC帧处理器
+// FrameHandler 帧处理器
 // ============================================================================
 
-// NewAACFrameHandler 创建AAC帧处理器
-func NewAACFrameHandler(encoder *AudioEncoder, decoder *AudioDecoder) *AACFrameHandler {
-	return &AACFrameHandler{
-		encoder: encoder,
-		decoder: decoder,
-		quit:    make(chan struct{}),
+// NewFrameHandler 创建帧处理器
+func NewFrameHandler(encoder *AudioEncoder, decoder *AudioDecoder) *FrameHandler {
+	return &FrameHandler{
+		encoder:    encoder,
+		decoder:    decoder,
+		playbackCh: make(chan *protocol.AudioFramePacket, 50),
+		quit:       make(chan struct{}),
 	}
 }
 
 // StartCaptureLoop 启动采集-编码循环（Source端使用）
-func (h *AACFrameHandler) StartCaptureLoop(capture AudioCapture, broadcastFunc func(*protocol.AudioFramePacket)) {
+func (h *FrameHandler) StartCaptureLoop(capture AudioCapture, broadcastFunc func(*protocol.AudioFramePacket)) {
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -185,16 +159,12 @@ func (h *AACFrameHandler) StartCaptureLoop(capture AudioCapture, broadcastFunc f
 					continue
 				}
 
-				aac, err := h.encoder.Encode(pcm)
-				if err != nil || len(aac) == 0 {
+				encoded, err := h.encoder.Encode(pcm)
+				if err != nil || len(encoded) == 0 {
 					continue
 				}
 
-				frame := protocol.NewAudioFrame(aac, protocol.GetTimestamp())
-
-				if h.onFrame != nil {
-					h.onFrame(aac, frame.Timestamp)
-				}
+				frame := protocol.NewAudioFrame(encoded, protocol.GetTimestamp())
 
 				if broadcastFunc != nil {
 					broadcastFunc(frame)
@@ -205,32 +175,47 @@ func (h *AACFrameHandler) StartCaptureLoop(capture AudioCapture, broadcastFunc f
 }
 
 // StartPlaybackLoop 启动解码-播放循环（Receiver端使用）
-func (h *AACFrameHandler) StartPlaybackLoop(decoder *AudioDecoder, player AudioPlayer, syncEngine interface{}) {
+// 通过 onPCM 回调将解码后的 PCM 数据送出
+func (h *FrameHandler) StartPlaybackLoop(onPCM func(pcm []byte, timestamp uint64)) {
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
-
 		for {
 			select {
 			case <-h.quit:
 				return
-			default:
-				// 从同步引擎获取帧
-				// TODO: 接入 sync.SyncEngine
-				time.Sleep(10 * time.Millisecond)
+			case frame := <-h.playbackCh:
+				pcm, err := h.decoder.Decode(frame.Payload)
+				if err != nil || len(pcm) == 0 {
+					continue
+				}
+				if onPCM != nil {
+					onPCM(pcm, frame.Timestamp)
+				}
 			}
 		}
 	}()
 }
 
-// FeedFrame 喂入AAC帧进行解码
-func (h *AACFrameHandler) FeedFrame(payload []byte) ([]byte, error) {
+// FeedFrameForPlayback 喂入接收到的音频帧用于播放
+func (h *FrameHandler) FeedFrameForPlayback(frame *protocol.AudioFramePacket) {
+	select {
+	case h.playbackCh <- frame:
+	default:
+		// 队列满，丢弃帧
+	}
+}
+
+// FeedFrame 同步解码一帧（工具方法）
+func (h *FrameHandler) FeedFrame(payload []byte) ([]byte, error) {
 	return h.decoder.Decode(payload)
 }
 
-// Stop 停止处理
-func (h *AACFrameHandler) Stop() {
-	close(h.quit)
+// Stop 停止处理（sync.Once 保护，等待所有 goroutine 退出）
+func (h *FrameHandler) Stop() {
+	h.stopOnce.Do(func() {
+		close(h.quit)
+	})
 	h.wg.Wait()
 }
 
@@ -252,16 +237,19 @@ func (b *PCMBuffer) WriteInt16(samples []int16) {
 	b.samples = append(b.samples, samples...)
 }
 
-// WriteBytes 写入字节（自动转换）
+// WriteBytes 写入字节（自动转换为Int16，优化切片操作）
 func (b *PCMBuffer) WriteBytes(data []byte) error {
 	if len(data)%2 != 0 {
 		return fmt.Errorf("PCM字节长度必须为偶数: %d", len(data))
 	}
+	n := len(data) / 2
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for i := 0; i < len(data); i += 2 {
-		sample := int16(binary.LittleEndian.Uint16([]byte{data[i], data[i+1]}))
-		b.samples = append(b.samples, sample)
+	// 一次性扩容，避免逐个 append 导致多次扩容
+	start := len(b.samples)
+	b.samples = append(b.samples, make([]int16, n)...)
+	for i := 0; i < n; i++ {
+		b.samples[start+i] = int16(binary.LittleEndian.Uint16(data[i*2 : i*2+2]))
 	}
 	return nil
 }
@@ -295,6 +283,10 @@ func (b *PCMBuffer) Silence(threshold int16) bool {
 	return true
 }
 
+// ============================================================================
+// 工具函数
+// ============================================================================
+
 // Mix 混音（多路PCM叠加）
 func Mix(pcm1, pcm2 []int16, gain1, gain2 float32) []int16 {
 	maxLen := len(pcm1)
@@ -312,7 +304,6 @@ func Mix(pcm1, pcm2 []int16, gain1, gain2 float32) []int16 {
 			v2 = int32(float32(pcm2[i]) * gain2)
 		}
 		sum := v1 + v2
-		// 限幅
 		if sum > 32767 {
 			sum = 32767
 		}
@@ -335,7 +326,6 @@ func ToBytes(samples []int16) []byte {
 
 // VolumeScale 按音量缩放PCM
 func VolumeScale(samples []byte, volume int) []byte {
-	// volume: 0-100
 	if volume < 0 {
 		volume = 0
 	}
@@ -346,7 +336,7 @@ func VolumeScale(samples []byte, volume int) []byte {
 
 	buf := make([]byte, len(samples))
 	for i := 0; i+1 < len(samples); i += 2 {
-		sample := int16(binary.LittleEndian.Uint16([]byte{samples[i], samples[i+1]}))
+		sample := int16(binary.LittleEndian.Uint16(samples[i : i+2]))
 		scaled := float32(sample) * scale
 		if scaled > 32767 {
 			scaled = 32767
@@ -369,7 +359,7 @@ func IsSilent(pcm []byte, threshold int16) bool {
 		return true
 	}
 	for i := 0; i+1 < len(pcm); i += 2 {
-		sample := int16(binary.LittleEndian.Uint16([]byte{pcm[i], pcm[i+1]}))
+		sample := int16(binary.LittleEndian.Uint16(pcm[i : i+2]))
 		if sample < -threshold || sample > threshold {
 			return false
 		}
@@ -385,7 +375,7 @@ func RMS(pcm []byte) float64 {
 	var sum float64
 	count := 0
 	for i := 0; i+1 < len(pcm); i += 2 {
-		sample := int16(binary.LittleEndian.Uint16([]byte{pcm[i], pcm[i+1]}))
+		sample := int16(binary.LittleEndian.Uint16(pcm[i : i+2]))
 		sum += float64(sample) * float64(sample)
 		count++
 	}

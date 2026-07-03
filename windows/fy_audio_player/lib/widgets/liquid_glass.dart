@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
 import 'dart:ui';
 
+/// 液态玻璃卡片 - 根据当前 [Theme.brightness] 自适应深/浅色透明度。
+///
+/// 修复要点：
+/// - 深色主题下提高透明度对比，避免文字与背景融为一体；
+/// - boxShadow 与 ClipRRect 共用同一 [borderRadius]，避免圆角错位。
 class LiquidGlassCard extends StatelessWidget {
   final Widget child;
   final double blurRadius;
@@ -21,7 +26,11 @@ class LiquidGlassCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final cardOpacity = isDark ? 0.08 : 0.12;
+    final borderOpacity = isDark ? 0.10 : 0.18;
+
+    return DecoratedBox(
       decoration: hasShadow
           ? BoxDecoration(
               borderRadius: BorderRadius.circular(borderRadius),
@@ -38,7 +47,7 @@ class LiquidGlassCard extends StatelessWidget {
                 ),
               ],
             )
-          : null,
+          : const BoxDecoration(),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(borderRadius),
         child: BackdropFilter(
@@ -49,9 +58,9 @@ class LiquidGlassCard extends StatelessWidget {
           child: Container(
             padding: padding > 0 ? EdgeInsets.all(padding) : null,
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.12),
+              color: Colors.white.withOpacity(cardOpacity),
               border: Border.all(
-                color: Colors.white.withOpacity(0.18),
+                color: Colors.white.withOpacity(borderOpacity),
                 width: 0.5,
               ),
               borderRadius: BorderRadius.circular(borderRadius),
@@ -64,6 +73,12 @@ class LiquidGlassCard extends StatelessWidget {
   }
 }
 
+/// 液态玻璃按钮
+///
+/// 修复要点：
+/// - [onPressed] 为 null 时显示禁用态（灰色 + 降低不透明度）；
+/// - 使用 [InkWell] 替代 [GestureDetector] 以提供水波纹反馈；
+/// - 阴影与裁切使用同一圆角，避免视觉错位。
 class LiquidGlassButton extends StatelessWidget {
   final Widget child;
   final VoidCallback? onPressed;
@@ -80,12 +95,28 @@ class LiquidGlassButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onPressed,
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isDisabled = onPressed == null;
+
+    final Color bg;
+    final Color borderColor;
+    if (isDisabled) {
+      bg = Colors.grey.withOpacity(isDark ? 0.1 : 0.2);
+      borderColor = Colors.grey.withOpacity(0.3);
+    } else if (isActive) {
+      bg = activeColor.withOpacity(0.15);
+      borderColor = activeColor.withOpacity(0.4);
+    } else {
+      bg = Colors.white.withOpacity(isDark ? 0.06 : 0.08);
+      borderColor = Colors.white.withOpacity(isDark ? 0.10 : 0.15);
+    }
+
+    return Opacity(
+      opacity: isDisabled ? 0.5 : 1.0,
       child: Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
-          boxShadow: isActive
+          boxShadow: (isActive && !isDisabled)
               ? [
                   BoxShadow(
                     color: activeColor.withOpacity(0.2),
@@ -99,21 +130,25 @@ class LiquidGlassButton extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
           child: BackdropFilter(
             filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              decoration: BoxDecoration(
-                color: isActive
-                    ? activeColor.withOpacity(0.15)
-                    : Colors.white.withOpacity(0.08),
-                border: Border.all(
-                  color: isActive
-                      ? activeColor.withOpacity(0.4)
-                      : Colors.white.withOpacity(0.15),
-                  width: 0.5,
-                ),
+            child: Material(
+              color: bg,
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                onTap: onPressed,
                 borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: borderColor, width: 0.5),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: DefaultTextStyle(
+                    style: DefaultTextStyle.of(context).style,
+                    child: child,
+                  ),
+                ),
               ),
-              child: child,
             ),
           ),
         ),

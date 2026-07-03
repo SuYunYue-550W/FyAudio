@@ -41,40 +41,40 @@ const (
 	PortSync    = 5003 // 同步校准端口
 
 	// 音频参数
-	SampleRate   = 44100
-	Channels     = 2
+	SampleRate    = 44100
+	Channels      = 2
 	BitsPerSample = 16
 	FrameDuration = 20 // ms
-	AACBitrate   = 128 // kbps
+	AACBitrate    = 128 // kbps
 
 	// 缓冲区参数
-	BufferMinMS    = 20  // 最小缓冲（1帧）
-	BufferDefaultMS = 40 // 默认缓冲
-	BufferMaxMS    = 200 // 最大缓冲
+	BufferMinMS     = 20  // 最小缓冲（1帧）
+	BufferDefaultMS = 40  // 默认缓冲
+	BufferMaxMS     = 200 // 最大缓冲
 	MaxBufferFrames = 200 // 环形缓冲区最大帧数
 
 	// 心跳参数
-	HeartbeatInterval = 3 * time.Second // 心跳间隔
+	HeartbeatInterval = 3 * time.Second  // 心跳间隔
 	HeartbeatTimeout  = 10 * time.Second // 超时判定
 )
 
 // 消息类型
 const (
 	MsgTypeDiscover      = 0x01
-	MsgTypeOnline       = 0x02
-	MsgTypeOffline      = 0x03
-	MsgTypeSetSource    = 0x10
-	MsgTypeVolumeSync   = 0x11
-	MsgTypeSyncRequest  = 0x20
-	MsgTypeSyncResponse = 0x21
-	MsgTypeHeartbeat    = 0x30
+	MsgTypeOnline        = 0x02
+	MsgTypeOffline       = 0x03
+	MsgTypeSetSource     = 0x10
+	MsgTypeVolumeSync    = 0x11
+	MsgTypeSyncRequest   = 0x20
+	MsgTypeSyncResponse  = 0x21
+	MsgTypeHeartbeat     = 0x30
 )
 
 // 设备角色
 const (
-	RoleSource    = "source"
-	RoleReceiver  = "receiver"
-	RoleGateway   = "gateway"
+	RoleSource   = "source"
+	RoleReceiver = "receiver"
+	RoleGateway  = "gateway"
 )
 
 // 平台类型
@@ -89,9 +89,9 @@ const (
 type Capability string
 
 const (
-	CapSpeaker    Capability = "speaker"
-	CapBluetooth  Capability = "bluetooth"
-	CapCapture    Capability = "capture"
+	CapSpeaker   Capability = "speaker"
+	CapBluetooth Capability = "bluetooth"
+	CapCapture   Capability = "capture"
 )
 
 // ============================================================================
@@ -101,11 +101,11 @@ const (
 // AudioFramePacket 音频帧数据包
 // 格式: Magic(4) + Timestamp(8) + FrameLength(4) + Payload(N) + CRC16(2)
 type AudioFramePacket struct {
-	Magic       uint32    // 包头: 0x46594155
-	Timestamp   uint64   // UTC毫秒时间戳
-	FrameLength uint32    // AAC数据长度
-	Payload     []byte   // AAC压缩音频数据
-	CRC         uint16   // CRC16校验
+	Magic       uint32  // 包头: 0x46594155
+	Timestamp   uint64  // UTC毫秒时间戳
+	FrameLength uint32  // AAC数据长度
+	Payload     []byte  // AAC压缩音频数据
+	CRC         uint16  // CRC16校验
 }
 
 // ControlPacket 控制消息包
@@ -118,20 +118,20 @@ type ControlPacket struct {
 
 // DeviceInfo 设备信息
 type DeviceInfo struct {
-	DeviceID       string       `json:"device_id"`
-	DeviceName     string       `json:"device_name"`
-	Platform       string       `json:"platform"`
-	Role           string       `json:"role"`            // source | receiver | gateway
-	IP             string       `json:"ip"`
-	SampleRate     int          `json:"audio_sample_rate"`
-	Channels       int          `json:"audio_channels"`
-	Capabilities   []Capability `json:"capabilities"`
-	BluetoothConn  bool         `json:"bluetooth_connected"`
-	IsSource       bool         `json:"is_source"`
-	Volume         int          `json:"volume"`          // 0-100
-	LatencyCompensate int      `json:"latency_compensate"` // ms, 手动延迟补偿
-	Version        string       `json:"version"`
-	LastSeen       time.Time    `json:"-"`
+	DeviceID          string       `json:"device_id"`
+	DeviceName        string       `json:"device_name"`
+	Platform          string       `json:"platform"`
+	Role              string       `json:"role"` // source | receiver | gateway
+	IP                string       `json:"ip"`
+	SampleRate        int          `json:"audio_sample_rate"`
+	Channels          int          `json:"audio_channels"`
+	Capabilities      []Capability `json:"capabilities"`
+	BluetoothConn     bool         `json:"bluetooth_connected"`
+	IsSource          bool         `json:"is_source"`
+	Volume            int          `json:"volume"` // 0-100
+	LatencyCompensate int          `json:"latency_compensate"` // ms, 手动延迟补偿
+	Version           string       `json:"version"`
+	LastSeen          time.Time    `json:"-"`
 }
 
 // SyncRequest 同步校准请求
@@ -141,9 +141,9 @@ type SyncRequest struct {
 
 // SyncResponse 同步校准响应
 type SyncResponse struct {
-	ClientTime  uint64 `json:"client_time"`  // 客户端原始时间
-	ServerTime  uint64 `json:"server_time"`  // 服务端UTC毫秒时间
-	DeviceID    string `json:"device_id"`    // 当前音源设备ID
+	ClientTime uint64 `json:"client_time"` // 客户端原始时间
+	ServerTime uint64 `json:"server_time"` // 服务端UTC毫秒时间
+	DeviceID   string `json:"device_id"`   // 当前音源设备ID
 }
 
 // Heartbeat 心跳消息
@@ -192,13 +192,14 @@ func NewAudioFrame(payload []byte, timestamp uint64) *AudioFramePacket {
 
 // Serialize 序列化音频帧为二进制
 func (p *AudioFramePacket) Serialize() ([]byte, error) {
-	totalLen := 18 + len(p.Payload)
+	payloadLen := len(p.Payload)
+	totalLen := 18 + payloadLen
 	buf := make([]byte, totalLen)
 	binary.LittleEndian.PutUint32(buf[0:4], p.Magic)
 	binary.LittleEndian.PutUint64(buf[4:12], p.Timestamp)
-	binary.LittleEndian.PutUint32(buf[12:16], p.FrameLength)
-	copy(buf[16:16+p.FrameLength], p.Payload)
-	binary.LittleEndian.PutUint16(buf[16+p.FrameLength:18+len(p.Payload)], p.CRC)
+	binary.LittleEndian.PutUint32(buf[12:16], uint32(payloadLen))
+	copy(buf[16:16+payloadLen], p.Payload)
+	binary.LittleEndian.PutUint16(buf[16+payloadLen:18+payloadLen], p.CRC)
 	return buf, nil
 }
 

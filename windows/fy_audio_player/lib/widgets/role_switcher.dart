@@ -13,8 +13,6 @@ class RoleSwitcher extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-
     return SegmentedButton<String>(
       segments: const [
         ButtonSegment(

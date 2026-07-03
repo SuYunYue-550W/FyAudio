@@ -18,8 +18,8 @@ import (
 
 // Device 局域网内的设备
 type Device struct {
-	Info       *protocol.DeviceInfo
-	Addr       *net.UDPAddr
+	Info          *protocol.DeviceInfo
+	Addr          *net.UDPAddr
 	LastHeartbeat time.Time
 }
 
@@ -30,22 +30,31 @@ type DiscoveryService struct {
 	platform   string
 	role       string
 	localIP    string
-	listener   *net.UDPConn       // 控制消息监听
-	audioConn  *net.UDPConn       // 音频流连接
-	devices    map[string]*Device // deviceID -> Device
-	mu         sync.RWMutex
-	quit       chan struct{}
-	onDeviceOnline   func(*protocol.DeviceInfo)
+
+	listener       *net.UDPConn        // 控制消息监听
+	broadcastConns []*net.UDPConn      // 复用的广播发送 socket（每个广播地址一个）
+
+	devices map[string]*Device
+	mu      sync.RWMutex
+
+	quit     chan struct{}
+	quitOnce sync.Once
+	wg       sync.WaitGroup
+
+	callbackMu      sync.RWMutex // 保护回调设置
+	onDeviceOnline  func(*protocol.DeviceInfo)
 	onDeviceOffline func(string)
 }
 
 // AudioStream 音频流发送/接收
 type AudioStream struct {
-	conn      *net.UDPConn
-	isSource  bool
-	remoteIP  string
-	quit      chan struct{}
-	onFrame   func(*protocol.AudioFramePacket) // 仅receiver使用
+	conn     *net.UDPConn
+	isSource bool
+	remoteIP string
+	quit     chan struct{}
+	quitOnce sync.Once
+	wg       sync.WaitGroup
+	onFrame  func(*protocol.AudioFramePacket) // 仅receiver使用
 }
 
 // ============================================================================
@@ -78,46 +87,67 @@ func NewDiscoveryService(deviceID, deviceName, platform, role string) (*Discover
 		return nil, fmt.Errorf("监听控制端口失败: %w", err)
 	}
 
-	log.Printf("[Discovery] 监听控制端口 %d, 本机IP: %s", protocol.PortControl, svc.localIP)
+	// 预创建广播连接（复用 socket）
+	for _, baddr := range GetBroadcastAddrs() {
+		udpAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("%s:%d", baddr, protocol.PortControl))
+		if err != nil {
+			continue
+		}
+		conn, err := net.DialUDP("udp4", nil, udpAddr)
+		if err != nil {
+			log.Printf("[Discovery] 创建广播连接失败 %s: %v", baddr, err)
+			continue
+		}
+		svc.broadcastConns = append(svc.broadcastConns, conn)
+	}
+
+	log.Printf("[Discovery] 监听控制端口 %d, 本机IP: %s, 广播地址数: %d",
+		protocol.PortControl, svc.localIP, len(svc.broadcastConns))
 	return svc, nil
 }
 
 // resolveLocalIP 解析本机局域网IP
 func (s *DiscoveryService) resolveLocalIP() error {
+	// 尝试通过连接外部地址获取本机IP（不会真正发送数据）
 	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err != nil {
-		// 备用方案：遍历网络接口
-		ifaces, err := net.Interfaces()
-		if err != nil {
-			return err
+	if err == nil {
+		defer conn.Close()
+		if udpAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok && udpAddr.IP != nil {
+			s.localIP = udpAddr.IP.String()
+			return nil
 		}
-		for _, iface := range ifaces {
-			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-				continue
-			}
-			addrs, _ := iface.Addrs()
-			for _, addr := range addrs {
-				if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
-					s.localIP = ipnet.IP.String()
-					return nil
-				}
-			}
-		}
-		return err
 	}
-	defer conn.Close()
-	s.localIP = conn.LocalAddr().(*net.TCPAddr).IP.String()
-	return nil
+
+	// 备用方案：遍历网络接口
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return fmt.Errorf("获取网络接口失败: %w", err)
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+				s.localIP = ipnet.IP.String()
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("未找到可用的IPv4地址")
 }
 
 // Start 开始监听
 func (s *DiscoveryService) Start() error {
 	// 广播设备上线
-	s.broadcastOnline()
+	if err := s.broadcastOnline(); err != nil {
+		log.Printf("[Discovery] 初始广播上线失败: %v", err)
+	}
 
 	// 启动监听协程
+	s.wg.Add(2)
 	go s.recvLoop()
-	// 启动心跳协程
 	go s.heartbeatLoop()
 
 	return nil
@@ -125,6 +155,7 @@ func (s *DiscoveryService) Start() error {
 
 // recvLoop 接收控制消息循环
 func (s *DiscoveryService) recvLoop() {
+	defer s.wg.Done()
 	buf := make([]byte, 4096)
 	for {
 		select {
@@ -138,6 +169,12 @@ func (s *DiscoveryService) recvLoop() {
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
+			}
+			// 检查是否正在关闭
+			select {
+			case <-s.quit:
+				return
+			default:
 			}
 			log.Printf("[Discovery] 接收错误: %v", err)
 			continue
@@ -156,19 +193,19 @@ func (s *DiscoveryService) handlePacket(data []byte, addr *net.UDPAddr) {
 
 	switch packet.MsgType {
 	case protocol.MsgTypeDiscover:
-		// 对方在发现设备，回复自己的在线状态
+		// Discover 包 payload 为空，仅回复 Online 包，不保存设备（避免污染设备列表）
 		s.replyOnline(addr)
-		s.saveDevice(packet, addr)
 
 	case protocol.MsgTypeOnline:
 		var info protocol.DeviceInfo
 		if err := packet.ParsePayload(&info); err != nil {
 			return
 		}
-		s.saveDevice(packet, addr)
+		info.IP = addr.IP.String()
 		info.LastSeen = time.Now()
-		if s.onDeviceOnline != nil {
-			s.onDeviceOnline(&info)
+		isNew := s.saveDevice(&info, addr)
+		if isNew {
+			s.callOnline(&info)
 		}
 
 	case protocol.MsgTypeOffline:
@@ -186,7 +223,6 @@ func (s *DiscoveryService) handlePacket(data []byte, addr *net.UDPAddr) {
 		s.refreshHeartbeat(hb.DeviceID)
 
 	case protocol.MsgTypeSetSource:
-		// 音源切换指令，由业务层处理
 		log.Printf("[Discovery] 收到音源切换指令")
 
 	case protocol.MsgTypeVolumeSync:
@@ -198,40 +234,36 @@ func (s *DiscoveryService) handlePacket(data []byte, addr *net.UDPAddr) {
 	}
 }
 
-// saveDevice 保存/更新设备
-func (s *DiscoveryService) saveDevice(packet *protocol.ControlPacket, addr *net.UDPAddr) {
-	var info protocol.DeviceInfo
-	if err := packet.ParsePayload(&info); err != nil {
-		return
+// saveDevice 保存/更新设备，返回是否为新设备
+func (s *DiscoveryService) saveDevice(info *protocol.DeviceInfo, addr *net.UDPAddr) bool {
+	// 忽略自己
+	if info.DeviceID == s.deviceID {
+		return false
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// 忽略自己
-	if info.DeviceID == s.deviceID {
-		return
-	}
-
-	info.LastSeen = time.Now()
+	_, existed := s.devices[info.DeviceID]
 	s.devices[info.DeviceID] = &Device{
-		Info:          &info,
+		Info:          info,
 		Addr:          addr,
 		LastHeartbeat: time.Now(),
 	}
+	s.mu.Unlock()
+	return !existed
 }
 
-// removeDevice 移除设备
+// removeDevice 移除设备（解锁后回调，避免死锁）
 func (s *DiscoveryService) removeDevice(deviceID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.devices[deviceID]; ok {
+	_, existed := s.devices[deviceID]
+	if existed {
 		delete(s.devices, deviceID)
+	}
+	s.mu.Unlock()
+
+	if existed {
 		log.Printf("[Discovery] 设备离线: %s", deviceID)
-		if s.onDeviceOffline != nil {
-			s.onDeviceOffline(deviceID)
-		}
+		s.callOffline(deviceID)
 	}
 }
 
@@ -245,82 +277,80 @@ func (s *DiscoveryService) refreshHeartbeat(deviceID string) {
 	}
 }
 
+// buildDeviceInfo 构建本机设备信息
+func (s *DiscoveryService) buildDeviceInfo() *protocol.DeviceInfo {
+	return &protocol.DeviceInfo{
+		DeviceID:     s.deviceID,
+		DeviceName:   s.deviceName,
+		Platform:     s.platform,
+		Role:         s.role,
+		IP:           s.localIP,
+		SampleRate:   protocol.SampleRate,
+		Channels:     protocol.Channels,
+		Capabilities: []protocol.Capability{protocol.CapSpeaker, protocol.CapBluetooth},
+		BluetoothConn: false,
+		IsSource:     s.role == protocol.RoleSource,
+		Version:      "1.0.0",
+	}
+}
+
 // broadcastOnline 广播上线消息
 func (s *DiscoveryService) broadcastOnline() error {
-	info := &protocol.DeviceInfo{
-		DeviceID:       s.deviceID,
-		DeviceName:     s.deviceName,
-		Platform:       s.platform,
-		Role:           s.role,
-		IP:             s.localIP,
-		SampleRate:     protocol.SampleRate,
-		Channels:       protocol.Channels,
-		Capabilities:   []protocol.Capability{protocol.CapSpeaker, protocol.CapBluetooth},
-		BluetoothConn:  false,
-		IsSource:       s.role == protocol.RoleSource,
-		Version:        "1.0.0",
-	}
-
-	packet, err := protocol.NewControlPacket(protocol.MsgTypeOnline, info)
+	packet, err := protocol.NewControlPacket(protocol.MsgTypeOnline, s.buildDeviceInfo())
 	if err != nil {
 		return err
 	}
-	data, _ := packet.Serialize()
-
+	data, err := packet.Serialize()
+	if err != nil {
+		return err
+	}
 	return s.broadcast(data)
 }
 
-// replyOnline 回复在线消息
+// replyOnline 回复在线消息（复用 listener）
 func (s *DiscoveryService) replyOnline(addr *net.UDPAddr) error {
-	info := &protocol.DeviceInfo{
-		DeviceID:       s.deviceID,
-		DeviceName:     s.deviceName,
-		Platform:       s.platform,
-		Role:           s.role,
-		IP:             s.localIP,
-		SampleRate:     protocol.SampleRate,
-		Channels:       protocol.Channels,
-		BluetoothConn:  false,
-		IsSource:       s.role == protocol.RoleSource,
-		Version:        "1.0.0",
-	}
-
-	packet, err := protocol.NewControlPacket(protocol.MsgTypeOnline, info)
+	packet, err := protocol.NewControlPacket(protocol.MsgTypeOnline, s.buildDeviceInfo())
 	if err != nil {
 		return err
 	}
-	data, _ := packet.Serialize()
-
-	conn, err := net.DialUDP("udp4", nil, addr)
+	data, err := packet.Serialize()
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	_, err = conn.Write(data)
+	_, err = s.listener.WriteToUDP(data, addr)
 	return err
 }
 
-// broadcast 广播消息
+// broadcast 广播消息（复用预创建的 socket）
 func (s *DiscoveryService) broadcast(data []byte) error {
-	// 尝试获取广播地址
-	broadcastAddr := fmt.Sprintf("%s:%d", GetBroadcastAddr(), protocol.PortControl)
-	addr, err := net.ResolveUDPAddr("udp4", broadcastAddr)
-	if err != nil {
-		return err
+	var lastErr error
+	for _, conn := range s.broadcastConns {
+		if _, err := conn.Write(data); err != nil {
+			lastErr = err
+			log.Printf("[Discovery] 广播失败: %v", err)
+		}
 	}
+	return lastErr
+}
 
-	conn, err := net.DialUDP("udp4", nil, addr)
+// broadcastOffline 广播离线消息
+func (s *DiscoveryService) broadcastOffline() {
+	packet, err := protocol.NewControlPacket(protocol.MsgTypeOffline, &protocol.DeviceInfo{
+		DeviceID: s.deviceID,
+	})
 	if err != nil {
-		return err
+		return
 	}
-	defer conn.Close()
-
-	_, err = conn.Write(data)
-	return err
+	data, err := packet.Serialize()
+	if err != nil {
+		return
+	}
+	s.broadcast(data)
 }
 
 // heartbeatLoop 心跳循环
 func (s *DiscoveryService) heartbeatLoop() {
+	defer s.wg.Done()
 	ticker := time.NewTicker(protocol.HeartbeatInterval)
 	defer ticker.Stop()
 
@@ -332,7 +362,6 @@ func (s *DiscoveryService) heartbeatLoop() {
 			hb := protocol.Heartbeat{
 				DeviceID: s.deviceID,
 				IsSource: s.role == protocol.RoleSource,
-				// AudioState 由业务层更新
 			}
 			packet, _ := protocol.NewControlPacket(protocol.MsgTypeHeartbeat, hb)
 			data, _ := packet.Serialize()
@@ -344,20 +373,23 @@ func (s *DiscoveryService) heartbeatLoop() {
 	}
 }
 
-// checkTimeout 检查超时设备
+// checkTimeout 检查超时设备（先收集超时设备，解锁后再回调，避免死锁）
 func (s *DiscoveryService) checkTimeout() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	now := time.Now()
+	var timedOut []string
 	for id, dev := range s.devices {
 		if now.Sub(dev.LastHeartbeat) > protocol.HeartbeatTimeout {
 			delete(s.devices, id)
-			log.Printf("[Discovery] 设备超时移除: %s", id)
-			if s.onDeviceOffline != nil {
-				s.onDeviceOffline(id)
-			}
+			timedOut = append(timedOut, id)
 		}
+	}
+	s.mu.Unlock()
+
+	// 解锁后回调，避免回调内调用 GetDevices(RLock) 导致死锁
+	for _, id := range timedOut {
+		log.Printf("[Discovery] 设备超时移除: %s", id)
+		s.callOffline(id)
 	}
 }
 
@@ -395,29 +427,58 @@ func (s *DiscoveryService) SendVolumeSync(volume int) error {
 	return s.broadcast(data)
 }
 
-// OnDeviceOnline 设置设备上线回调
+// OnDeviceOnline 设置设备上线回调（线程安全）
 func (s *DiscoveryService) OnDeviceOnline(fn func(*protocol.DeviceInfo)) {
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
 	s.onDeviceOnline = fn
 }
 
-// OnDeviceOffline 设置设备下线回调
+// OnDeviceOffline 设置设备下线回调（线程安全）
 func (s *DiscoveryService) OnDeviceOffline(fn func(string)) {
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
 	s.onDeviceOffline = fn
 }
 
-// Close 关闭服务
-func (s *DiscoveryService) Close() error {
-	close(s.quit)
-	// 广播离线消息
-	packet, _ := protocol.NewControlPacket(protocol.MsgTypeOffline, map[string]string{
-		"device_id": s.deviceID,
-	})
-	if data, err := packet.Serialize(); err == nil {
-		s.broadcast(data)
+// callOnline 调用设备上线回调
+func (s *DiscoveryService) callOnline(info *protocol.DeviceInfo) {
+	s.callbackMu.RLock()
+	fn := s.onDeviceOnline
+	s.callbackMu.RUnlock()
+	if fn != nil {
+		fn(info)
 	}
+}
 
+// callOffline 调用设备离线回调
+func (s *DiscoveryService) callOffline(deviceID string) {
+	s.callbackMu.RLock()
+	fn := s.onDeviceOffline
+	s.callbackMu.RUnlock()
+	if fn != nil {
+		fn(deviceID)
+	}
+}
+
+// Close 关闭服务（sync.Once 保护，等待 goroutine 退出）
+func (s *DiscoveryService) Close() error {
+	s.quitOnce.Do(func() {
+		close(s.quit)
+	})
+
+	// 广播离线消息
+	s.broadcastOffline()
+
+	// 等待 goroutine 退出
+	s.wg.Wait()
+
+	// 关闭连接
 	if s.listener != nil {
 		s.listener.Close()
+	}
+	for _, c := range s.broadcastConns {
+		c.Close()
 	}
 	return nil
 }
@@ -426,7 +487,7 @@ func (s *DiscoveryService) Close() error {
 // AudioStream 音频流
 // ============================================================================
 
-// NewAudioStream 创建筑音频流（Receiver模式）
+// NewAudioStream 创建音频流（Receiver模式）
 func NewAudioStream(onFrame func(*protocol.AudioFramePacket)) (*AudioStream, error) {
 	as := &AudioStream{
 		onFrame: onFrame,
@@ -452,7 +513,7 @@ func NewAudioStream(onFrame func(*protocol.AudioFramePacket)) (*AudioStream, err
 	return as, nil
 }
 
-// NewAudioStreamAsSource 创建筑音频流（Source模式）
+// NewAudioStreamAsSource 创建音频流（Source模式）
 func NewAudioStreamAsSource(broadcastIP string) (*AudioStream, error) {
 	addr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("%s:%d", broadcastIP, protocol.PortAudio))
 	if err != nil {
@@ -477,8 +538,10 @@ func NewAudioStreamAsSource(broadcastIP string) (*AudioStream, error) {
 
 // StartReceiving 开始接收音频流
 func (as *AudioStream) StartReceiving() {
+	as.wg.Add(1)
 	go func() {
-		buf := make([]byte, 64*1024) // 64KB缓冲，足够大
+		defer as.wg.Done()
+		buf := make([]byte, 64*1024) // 64KB缓冲
 		for {
 			select {
 			case <-as.quit:
@@ -492,14 +555,19 @@ func (as *AudioStream) StartReceiving() {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					continue
 				}
+				// 检查是否正在关闭
+				select {
+				case <-as.quit:
+					return
+				default:
+				}
 				log.Printf("[AudioStream] 接收错误: %v", err)
 				continue
 			}
 
 			packet, err := protocol.ParseAudioFrame(buf[:n])
 			if err != nil {
-				// 忽略无效帧
-				continue
+				continue // 忽略无效帧
 			}
 
 			if as.onFrame != nil {
@@ -522,12 +590,15 @@ func (as *AudioStream) SendFrame(frame *protocol.AudioFramePacket) error {
 	return err
 }
 
-// Close 关闭音频流
+// Close 关闭音频流（sync.Once 保护，等待 goroutine 退出）
 func (as *AudioStream) Close() error {
-	close(as.quit)
+	as.quitOnce.Do(func() {
+		close(as.quit)
+	})
 	if as.conn != nil {
-		return as.conn.Close()
+		as.conn.Close()
 	}
+	as.wg.Wait()
 	return nil
 }
 
@@ -535,31 +606,40 @@ func (as *AudioStream) Close() error {
 // 辅助函数
 // ============================================================================
 
-// getBroadcastAddr 获取本机网段的广播地址
-func GetBroadcastAddr() string {
-	// 遍历网络接口找广播地址
+// GetBroadcastAddrs 获取本机所有网段的广播地址
+func GetBroadcastAddrs() []string {
+	var result []string
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return "255.255.255.255"
+		return []string{"255.255.255.255"}
 	}
 
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagBroadcast == 0 {
 			continue
 		}
-		addrs, _ := iface.Addrs()
-		for _, addr := range addrs {
+		ifaceAddrs, _ := iface.Addrs()
+		for _, addr := range ifaceAddrs {
 			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
-				// 计算广播地址
 				broadcast := make(net.IP, 4)
 				for i := 0; i < 4; i++ {
 					broadcast[i] = ipnet.IP[i] | ^ipnet.Mask[i]
 				}
-				return broadcast.String()
+				result = append(result, broadcast.String())
 			}
 		}
 	}
-	return "255.255.255.255"
+
+	if len(result) == 0 {
+		result = append(result, "255.255.255.255")
+	}
+	return result
+}
+
+// GetBroadcastAddr 返回第一个广播地址（兼容单地址调用）
+func GetBroadcastAddr() string {
+	addrs := GetBroadcastAddrs()
+	return addrs[0]
 }
 
 // GetLocalIPs 获取本机所有IPv4地址

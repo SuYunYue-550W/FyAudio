@@ -21,7 +21,6 @@ class _AudioWaveformState extends State<AudioWaveform>
   late AnimationController _controller;
   final List<double> _samples = List.generate(50, (_) => 0.0);
   final Random _random = Random();
-  int _lastFrameCount = 0;
 
   @override
   void initState() {
@@ -48,7 +47,6 @@ class _AudioWaveformState extends State<AudioWaveform>
         }
       });
     }
-    _lastFrameCount = widget.frameCount;
   }
 
   void _updateSamples() {

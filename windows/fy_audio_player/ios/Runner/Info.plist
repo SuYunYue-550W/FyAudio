@@ -45,5 +45,25 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>用于设备发现和音频同步</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>用于连接蓝牙音频设备</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>用于连接蓝牙音频设备</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>用于音频采集</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_fyaudio._udp</string>
+		<string>_fyaudio._tcp</string>
+	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 </dict>
 </plist>

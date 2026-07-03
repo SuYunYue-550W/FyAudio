@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import '../core/theme_manager.dart';
 import '../core/scene_manager.dart';
-import '../core/codec_manager.dart';
 import 'liquid_glass.dart';
 
 class AudioControlPanel extends StatelessWidget {

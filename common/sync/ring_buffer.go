@@ -4,8 +4,8 @@ package sync
 
 import (
 	"container/list"
-	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -19,32 +19,31 @@ import (
 // AudioFrame 音频帧（含时间戳）
 type AudioFrame struct {
 	Timestamp uint64 // 音源端UTC毫秒时间戳
-	Payload   []byte // AAC压缩数据
-	RecvTime  int64  // 本机收到时间（纳秒）
+	Payload   []byte // PCM/AAC数据
+	RecvTime  int64  // 本机收到时间（毫秒）
 }
 
 // RingBuffer 环形音频缓冲池
 type RingBuffer struct {
-	capacity    int           // 缓冲区容量（帧数）
-	frames      *list.List    // 双向链表存储
-	maxAgeMs    int64         // 帧最大存活时间（毫秒）
-	mu          sync.Mutex
-	notEmpty    *sync.Cond     // 条件变量，有帧可读时通知
+	capacity int        // 缓冲区容量（帧数）
+	frames   *list.List // 双向链表存储
+	maxAgeMs int64      // 帧最大存活时间（毫秒）
+	mu       sync.Mutex
 }
 
 // SyncEngine 同步引擎
 type SyncEngine struct {
-	buffer          *RingBuffer
-	bufferWindowMs  int64         // 动态缓冲窗口（毫秒）
-	clockOffset     int64         // 时钟偏差补偿（毫秒）
-	manualOffsetMs  int64         // 用户手动补偿（毫秒）
-	latencyHistory  []int64       // 延迟历史（滑动窗口）
-	latencyIdx      int
-	estimatedRTT    int64         // 估算的RTT（毫秒）
+	buffer         *RingBuffer
+	bufferWindowMs int64   // 动态缓冲窗口（毫秒）
+	clockOffset    int64   // 时钟偏差补偿（毫秒）
+	manualOffsetMs int64   // 用户手动补偿（毫秒）
+	latencyHistory []int64 // 延迟历史（滑动窗口）
+	latencyIdx     int     // 已写入的延迟样本数
+	estimatedRTT   int64   // 估算的RTT（毫秒）
 	isPlaying      bool
-	droppedFrames   int64
-	totalFrames     int64
-	mu              sync.RWMutex
+	droppedFrames  int64
+	totalFrames    int64
+	mu             sync.RWMutex
 }
 
 // ============================================================================
@@ -53,16 +52,14 @@ type SyncEngine struct {
 
 // NewRingBuffer 创建环形缓冲池
 func NewRingBuffer(capacity int) *RingBuffer {
-	rb := &RingBuffer{
+	return &RingBuffer{
 		capacity: capacity,
-		frames:    list.New(),
-		maxAgeMs:  500, // 超过500ms的帧直接丢弃
+		frames:   list.New(),
+		maxAgeMs: 500, // 超过500ms的帧直接丢弃
 	}
-	rb.notEmpty = sync.NewCond(&rb.mu)
-	return rb
 }
 
-// Push 写入帧（带时间戳）
+// Push 写入帧（带时间戳去重和过期检查）
 func (rb *RingBuffer) Push(frame *AudioFrame) bool {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
@@ -70,8 +67,15 @@ func (rb *RingBuffer) Push(frame *AudioFrame) bool {
 	// 检查帧是否过期
 	nowMs := time.Now().UnixNano() / 1_000_000
 	if int64(frame.Timestamp) < nowMs-rb.maxAgeMs {
-		// 帧已过期，丢弃
 		return false
+	}
+
+	// 去重：已有相同时间戳的帧则丢弃
+	for e := rb.frames.Front(); e != nil; e = e.Next() {
+		f := e.Value.(*AudioFrame)
+		if f.Timestamp == frame.Timestamp {
+			return false
+		}
 	}
 
 	// 环形缓冲：超出容量则移除最老的帧
@@ -79,7 +83,7 @@ func (rb *RingBuffer) Push(frame *AudioFrame) bool {
 		rb.frames.Remove(rb.frames.Front())
 	}
 
-	// 插入到正确位置（按时间戳排序，二分查找优化可用二叉搜索树）
+	// 按时间戳有序插入
 	inserted := false
 	for e := rb.frames.Back(); e != nil; e = e.Prev() {
 		f := e.Value.(*AudioFrame)
@@ -93,48 +97,43 @@ func (rb *RingBuffer) Push(frame *AudioFrame) bool {
 		rb.frames.PushFront(frame)
 	}
 
-	rb.notEmpty.Signal()
 	return true
 }
 
-// Pop 弹出最早可播放的帧
-// wait=true 时阻塞等待，wait=false 时立即返回
-func (rb *RingBuffer) Pop(wait bool) (*AudioFrame, error) {
-	rb.mu.Lock()
-	defer rb.mu.Unlock()
-
-	for rb.frames.Len() == 0 {
-		if !wait {
-			return nil, fmt.Errorf("缓冲区为空")
-		}
-		rb.notEmpty.Wait()
-	}
-
-	front := rb.frames.Front()
-	frame := front.Value.(*AudioFrame)
-	rb.frames.Remove(front)
-	return frame, nil
-}
-
-// PopByTimestamp 按时间戳弹出帧
-// 返回 <= targetTimestamp 的最早帧
-func (rb *RingBuffer) PopByTimestamp(targetTimestamp uint64) (*AudioFrame, error) {
+// Pop 弹出最早的帧（非阻塞，缓冲区为空时返回 nil）
+func (rb *RingBuffer) Pop() *AudioFrame {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 
 	if rb.frames.Len() == 0 {
-		return nil, fmt.Errorf("缓冲区为空")
+		return nil
 	}
 
 	front := rb.frames.Front()
 	frame := front.Value.(*AudioFrame)
+	rb.frames.Remove(front)
+	return frame
+}
 
-	if frame.Timestamp > targetTimestamp {
-		return nil, fmt.Errorf("下一帧未到播放时间")
+// GetPlayableFrame 获取已到播放时间的帧
+// 帧满足: frame.Timestamp + bufferWindowMs <= nowMs
+func (rb *RingBuffer) GetPlayableFrame(bufferWindowMs int64) *AudioFrame {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+
+	if rb.frames.Len() == 0 {
+		return nil
 	}
 
-	rb.frames.Remove(front)
-	return frame, nil
+	nowMs := time.Now().UnixNano() / 1_000_000
+	front := rb.frames.Front()
+	frame := front.Value.(*AudioFrame)
+
+	if int64(frame.Timestamp)+bufferWindowMs <= nowMs {
+		rb.frames.Remove(front)
+		return frame
+	}
+	return nil
 }
 
 // Size 获取当前缓冲帧数
@@ -166,14 +165,12 @@ func (rb *RingBuffer) Drain() int {
 
 // NewSyncEngine 创建同步引擎
 func NewSyncEngine() *SyncEngine {
-	se := &SyncEngine{
+	return &SyncEngine{
 		buffer:         NewRingBuffer(protocol.MaxBufferFrames),
 		bufferWindowMs: int64(protocol.BufferDefaultMS),
 		latencyHistory: make([]int64, 20),
-		latencyIdx:     0,
 		estimatedRTT:   50, // 初始估算RTT 50ms
 	}
-	return se
 }
 
 // FeedFrame 喂入音频帧
@@ -182,26 +179,27 @@ func (se *SyncEngine) FeedFrame(packet *protocol.AudioFramePacket) bool {
 	frame := &AudioFrame{
 		Timestamp: packet.Timestamp,
 		Payload:   packet.Payload,
-		RecvTime:  time.Now().UnixNano(),
+		RecvTime:  time.Now().UnixNano() / 1_000_000,
 	}
 
 	se.mu.Lock()
 	se.totalFrames++
 	// 估算网络延迟
 	nowMs := time.Now().UnixNano() / 1_000_000
-	latency := int64(nowMs) - int64(frame.Timestamp)
+	latency := nowMs - int64(frame.Timestamp)
 	if latency < 0 {
 		latency = 0
 	}
 	se.latencyHistory[se.latencyIdx%len(se.latencyHistory)] = latency
 	se.latencyIdx++
 	se.estimatedRTT = se.calcMedianLatency()
+	se.updateBufferWindow()
 	se.mu.Unlock()
 
 	return se.buffer.Push(frame)
 }
 
-// calcMedianLatency 计算中位延迟
+// calcMedianLatency 计算中位延迟（使用 sort.Ints，无副作用）
 func (se *SyncEngine) calcMedianLatency() int64 {
 	count := se.latencyIdx
 	if count == 0 {
@@ -211,58 +209,37 @@ func (se *SyncEngine) calcMedianLatency() int64 {
 		count = len(se.latencyHistory)
 	}
 
-	// 取最近count个值的中位数
+	// 取最近 count 个值
 	vals := make([]int64, count)
-	for i := 0; i < count; i++ {
-		vals[i] = se.latencyHistory[i]
-	}
+	copy(vals, se.latencyHistory[:count])
+	sort.Slice(vals, func(i, j int) bool {
+		return vals[i] < vals[j]
+	})
 
-	// 简单选择排序
-	for i := 0; i < count-1; i++ {
-		minIdx := i
-		for j := i + 1; j < count; j++ {
-			if vals[j] < vals[minIdx] {
-				minIdx = j
-			}
-		}
-		vals[i], vals[minIdx] = vals[minIdx], vals[i]
-	}
+	return vals[count/2]
+}
 
-	// 返回中位数
-	median := vals[count/2]
-	// 更新缓冲窗口 = 中位延迟 * 2，但不超过最大值
+// updateBufferWindow 根据中位延迟更新缓冲窗口
+func (se *SyncEngine) updateBufferWindow() {
+	median := se.calcMedianLatency()
 	window := median * 2
-	if window < protocol.BufferMinMS {
-		window = protocol.BufferMinMS
+	if window < int64(protocol.BufferMinMS) {
+		window = int64(protocol.BufferMinMS)
 	}
-	if window > protocol.BufferMaxMS {
-		window = protocol.BufferMaxMS
+	if window > int64(protocol.BufferMaxMS) {
+		window = int64(protocol.BufferMaxMS)
 	}
 	se.bufferWindowMs = window
-
-	return median
 }
 
 // GetPlayableFrame 获取可播放的帧
-// 计算帧的实际播放时间
-func (se *SyncEngine) GetPlayableFrame() (*AudioFrame, error) {
+// 帧播放条件: frame.Timestamp + windowMs <= now
+// windowMs = bufferWindow + clockOffset + manualOffset
+func (se *SyncEngine) GetPlayableFrame() *AudioFrame {
 	se.mu.RLock()
-	nowMs := time.Now().UnixNano() / 1_000_000
-	// 计算目标播放时间
-	targetPlayTime := nowMs + se.bufferWindowMs + se.clockOffset + se.manualOffsetMs
+	windowMs := se.bufferWindowMs + se.clockOffset + se.manualOffsetMs
 	se.mu.RUnlock()
-
-	// 按目标时间查找帧
-	frame, err := se.buffer.PopByTimestamp(uint64(targetPlayTime))
-	if err != nil {
-		// 缓冲区不足，等待
-		frame, err = se.buffer.Pop(true) // 阻塞等待
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return frame, nil
+	return se.buffer.GetPlayableFrame(windowMs)
 }
 
 // SetManualOffset 设置手动延迟补偿
@@ -299,15 +276,20 @@ func (se *SyncEngine) UpdateClockOffset(clientTime, serverTime uint64, rttMs int
 	log.Printf("[SyncEngine] 时钟偏差补偿: %d ms (RTT=%d ms)", se.clockOffset, rttMs)
 }
 
-// Reset 重置同步状态
+// Reset 重置同步状态（统一在锁内操作，再清空缓冲）
 func (se *SyncEngine) Reset() {
-	se.buffer.Clear()
 	se.mu.Lock()
 	se.clockOffset = 0
 	se.estimatedRTT = 50
 	se.isPlaying = false
+	se.latencyIdx = 0
+	for i := range se.latencyHistory {
+		se.latencyHistory[i] = 0
+	}
 	se.mu.Unlock()
-	log.Printf("[SyncEngine] 同步状态已重置，丢弃 %d 帧", se.buffer.Drain())
+
+	dropped := se.buffer.Drain()
+	log.Printf("[SyncEngine] 同步状态已重置，丢弃 %d 帧", dropped)
 }
 
 // GetStats 获取同步统计信息
@@ -349,15 +331,23 @@ func NewSyncCalibrator() *SyncCalibrator {
 	}
 }
 
-// MakeSyncRequest 生成同步请求
+// MakeSyncRequest 生成同步请求（同时清理过期请求，防止内存泄漏）
 func (sc *SyncCalibrator) MakeSyncRequest() *protocol.SyncRequest {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
+	// 清理过期请求（超过10秒未响应的）
+	now := time.Now()
+	for id, t := range sc.requests {
+		if now.Sub(t) > 10*time.Second {
+			delete(sc.requests, id)
+		}
+	}
+
 	req := &protocol.SyncRequest{
 		ClientTime: protocol.GetTimestamp(),
 	}
-	sc.requests[req.ClientTime] = time.Now()
+	sc.requests[req.ClientTime] = now
 	return req
 }
 

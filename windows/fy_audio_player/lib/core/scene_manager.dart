@@ -2,14 +2,18 @@ import 'dart:async';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 
-
+/// 场景模式 - 决定缓冲/码率/帧长/严格同步等参数
 enum SceneMode { music, video, game, room, weakNet, night }
 
+/// 场景自动检测与切换管理器
+///
+/// 通过 [onSceneChanged] 回调将场景参数广播给 AudioService / NetworkService，
+/// 避免反向依赖。所有可变字段私有化，仅通过 getter 暴露。
 class SceneAutoManager extends ChangeNotifier {
-  double bufferMs = 40;
-  int bitRate = 128;
-  int frameMs = 20;
-  bool strictSync = false;
+  double _bufferMs = 40;
+  int _bitRate = 128;
+  int _frameMs = 20;
+  bool _strictSync = false;
   SceneMode currentScene = SceneMode.music;
   bool _autoDetectEnabled = true;
 
@@ -23,14 +27,27 @@ class SceneAutoManager extends ChangeNotifier {
   bool _isHighLatency = false;
   bool _isLowBandwidth = false;
 
+  /// 场景变更回调 - 由外部（如 HomeScreen）注册，转发给 AudioService / NetworkService
+  void Function(SceneMode mode, int bufferMs, int bitRate, int frameMs, bool strictSync)?
+      onSceneChanged;
+
+  double get bufferMs => _bufferMs;
+  int get bitRate => _bitRate;
+  int get frameMs => _frameMs;
+  bool get strictSync => _strictSync;
   bool get autoDetectEnabled => _autoDetectEnabled;
   double get currentLossRate => _currentLossRate;
   int get deviceCount => _deviceCount;
 
+  /// 启动自动检测 - 先取消已有定时器避免泄漏
   void startAutoDetection() {
+    _detectionTimer?.cancel();
+    _networkMonitorTimer?.cancel();
     _autoDetectEnabled = true;
-    _detectionTimer = Timer.periodic(const Duration(seconds: 3), (_) => _performAutoDetection());
-    _networkMonitorTimer = Timer.periodic(const Duration(seconds: 2), (_) => _monitorNetworkQuality());
+    _detectionTimer =
+        Timer.periodic(const Duration(seconds: 3), (_) => _performAutoDetection());
+    _networkMonitorTimer =
+        Timer.periodic(const Duration(seconds: 2), (_) => _monitorNetworkQuality());
     debugPrint('[SceneManager] 自动场景检测已启动');
   }
 
@@ -38,6 +55,8 @@ class SceneAutoManager extends ChangeNotifier {
     _autoDetectEnabled = false;
     _detectionTimer?.cancel();
     _networkMonitorTimer?.cancel();
+    _detectionTimer = null;
+    _networkMonitorTimer = null;
     debugPrint('[SceneManager] 自动场景检测已停止');
   }
 
@@ -85,7 +104,8 @@ class SceneAutoManager extends ChangeNotifier {
 
   bool _checkGameMode() {
     if (_currentFreq.length >= 32) {
-      final highFreqEnergy = _currentFreq.sublist(16, 32).reduce((a, b) => a + b) / 16;
+      final highFreqEnergy =
+          _currentFreq.sublist(16, 32).reduce((a, b) => a + b) / 16;
       final rapidChanges = _countRapidChanges(_currentFreq);
       return highFreqEnergy > 0.6 && rapidChanges > 8;
     }
@@ -98,8 +118,10 @@ class SceneAutoManager extends ChangeNotifier {
 
   bool _checkVideoMode() {
     if (_currentFreq.length >= 16) {
-      final midFreqEnergy = _currentFreq.sublist(4, 12).reduce((a, b) => a + b) / 8;
-      final lowFreqEnergy = _currentFreq.sublist(0, 4).reduce((a, b) => a + b) / 4;
+      final midFreqEnergy =
+          _currentFreq.sublist(4, 12).reduce((a, b) => a + b) / 8;
+      final lowFreqEnergy =
+          _currentFreq.sublist(0, 4).reduce((a, b) => a + b) / 4;
       return midFreqEnergy > 0.4 && lowFreqEnergy > 0.3;
     }
     return false;
@@ -115,12 +137,15 @@ class SceneAutoManager extends ChangeNotifier {
     return count;
   }
 
+  /// 网络质量监控 - 当前为模拟数据
+  // TODO: 替换为基于 NetworkService 真实统计的丢包率与延迟采集
   void _monitorNetworkQuality() {
     _currentLossRate = 0.01 + _random.nextDouble() * 0.04;
     _isHighLatency = _random.nextDouble() > 0.85;
     _isLowBandwidth = _random.nextDouble() > 0.9;
   }
 
+  /// 供外部更新音频频谱（用于场景判定的输入）
   void updateAudioSpectrum(List<double> spectrum) {
     _currentFreq = spectrum;
   }
@@ -136,74 +161,52 @@ class SceneAutoManager extends ChangeNotifier {
     debugPrint('[SceneManager] 网络质量更新: 丢包率=$lossRate, 延迟=$latencyMs');
   }
 
-  SceneMode detectScene({
-    required double lossRate,
-    required List<double> freq,
-    required int hour,
-    int deviceCount = 1,
-  }) {
-    if (hour >= 22 || hour <= 7) {
-      return SceneMode.night;
-    }
-    if (lossRate > 0.05) {
-      return SceneMode.weakNet;
-    }
-    if (deviceCount >= 3) {
-      return SceneMode.room;
-    }
-    if (freq.length > 20) {
-      bool isGame = freq.sublist(20).every((e) => e > 0.6);
-      if (isGame) return SceneMode.game;
-    }
-    if (freq.length > 16) {
-      bool isVideo = freq.sublist(8, 16).every((e) => e > 0.4);
-      if (isVideo) return SceneMode.video;
-    }
-    return SceneMode.music;
-  }
-
+  /// 应用场景 - 通过回调通知 AudioService / NetworkService
   void applyScene(SceneMode mode) {
     currentScene = mode;
     switch (mode) {
       case SceneMode.music:
-        bufferMs = 40;
-        bitRate = 192;
-        frameMs = 20;
-        strictSync = false;
+        _bufferMs = 40;
+        _bitRate = 192;
+        _frameMs = 20;
+        _strictSync = false;
         break;
       case SceneMode.video:
-        bufferMs = 45;
-        bitRate = 128;
-        frameMs = 20;
-        strictSync = true;
+        _bufferMs = 45;
+        _bitRate = 128;
+        _frameMs = 20;
+        _strictSync = true;
         break;
       case SceneMode.game:
-        bufferMs = 20;
-        bitRate = 96;
-        frameMs = 10;
-        strictSync = false;
+        _bufferMs = 20;
+        _bitRate = 96;
+        _frameMs = 10;
+        _strictSync = false;
         break;
       case SceneMode.weakNet:
-        bufferMs = 60;
-        bitRate = 96;
-        frameMs = 20;
-        strictSync = false;
+        _bufferMs = 60;
+        _bitRate = 96;
+        _frameMs = 20;
+        _strictSync = false;
         break;
       case SceneMode.night:
-        bufferMs = 40;
-        bitRate = 128;
-        frameMs = 20;
-        strictSync = false;
+        _bufferMs = 40;
+        _bitRate = 128;
+        _frameMs = 20;
+        _strictSync = false;
         break;
       case SceneMode.room:
-        bufferMs = 50;
-        bitRate = 128;
-        frameMs = 20;
-        strictSync = true;
+        _bufferMs = 50;
+        _bitRate = 128;
+        _frameMs = 20;
+        _strictSync = true;
         break;
     }
+    // 通过回调通知 AudioService / NetworkService 调整参数
+    onSceneChanged?.call(mode, _bufferMs.toInt(), _bitRate, _frameMs, _strictSync);
     notifyListeners();
-    debugPrint('[SceneManager] 场景切换: ${getSceneName()} (缓冲=$bufferMs ms, 码率=$bitRate kbps, 帧长=$frameMs ms)');
+    debugPrint(
+        '[SceneManager] 场景切换: ${getSceneName()} (缓冲=$_bufferMs ms, 码率=$_bitRate kbps, 帧长=$_frameMs ms)');
   }
 
   void setAutoDetect(bool enabled) {
