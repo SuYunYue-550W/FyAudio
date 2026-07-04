@@ -92,12 +92,13 @@ jobs:
         run: flutter pub get
 
       - name: Build Windows release
+        id: build_windows
         working-directory: windows/fy_audio_player
         continue-on-error: true
         run: flutter build windows --release
 
-      - name: Upload artifact if successful
-        if: success()
+      - name: Prepare Windows release
+        if: steps.build_windows.outcome == 'success'
         run: |
           New-Item -ItemType Directory -Force -Path releases/windows
           Copy-Item windows/fy_audio_player/build/windows/x64/runner/Release/fy_audio_player.exe releases/windows/
@@ -108,14 +109,14 @@ jobs:
           Compress-Archive -Path releases/windows/* -DestinationPath releases/fyaudio_windows.zip
 
       - name: Upload Windows artifact
-        if: success()
+        if: steps.build_windows.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: fyaudio_windows
           path: releases/fyaudio_windows.zip
 
       - name: Upload Windows to Release
-        if: github.event_name == 'release' && success()
+        if: github.event_name == 'release' && steps.build_windows.outcome == 'success'
         uses: softprops/action-gh-release@v2
         with:
           files: releases/fyaudio_windows.zip
@@ -143,25 +144,26 @@ jobs:
         run: flutter pub get
 
       - name: Build Android release
+        id: build_android
         working-directory: windows/fy_audio_player
         continue-on-error: true
         run: flutter build apk --release
 
-      - name: Upload artifact if successful
-        if: success()
+      - name: Prepare Android release
+        if: steps.build_android.outcome == 'success'
         run: |
           mkdir -p releases/android
           cp windows/fy_audio_player/build/app/outputs/apk/release/app-release.apk releases/android/fyaudio.apk
 
       - name: Upload Android artifact
-        if: success()
+        if: steps.build_android.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: fyaudio_android
           path: releases/android/fyaudio.apk
 
       - name: Upload Android to Release
-        if: github.event_name == 'release' && success()
+        if: github.event_name == 'release' && steps.build_android.outcome == 'success'
         uses: softprops/action-gh-release@v2
         with:
           files: releases/android/fyaudio.apk
