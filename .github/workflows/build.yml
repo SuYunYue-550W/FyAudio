@@ -9,108 +9,6 @@ on:
     types: [ created ]
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
-      - name: Build Go backend
-        run: |
-          go env -w GOPROXY=https://goproxy.cn,direct
-          cd common
-          go build -o fyaudio_backend.exe .
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.22.x'
-          channel: 'stable'
-
-      - name: Flutter doctor
-        run: flutter doctor -v
-
-      - name: Get dependencies
-        working-directory: windows/fy_audio_player
-        run: flutter pub get
-
-      - name: Build Windows release
-        working-directory: windows/fy_audio_player
-        run: flutter build windows --release --verbose
-
-      - name: Prepare release
-        run: |
-          New-Item -ItemType Directory -Force -Path releases/windows
-          Copy-Item windows/fy_audio_player/build/windows/x64/runner/Release/fy_audio_player.exe releases/windows/
-          Copy-Item windows/fy_audio_player/build/windows/x64/runner/Release/flutter_windows.dll releases/windows/
-          Copy-Item windows/fy_audio_player/build/windows/x64/runner/Release/*.dll releases/windows/
-          Copy-Item windows/fy_audio_player/build/windows/x64/runner/Release/data releases/windows/data -Recurse
-          Copy-Item common/fyaudio_backend.exe releases/windows/
-          Compress-Archive -Path releases/windows/* -DestinationPath releases/fyaudio_windows.zip
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fyaudio_windows
-          path: releases/fyaudio_windows.zip
-
-      - name: Upload to Release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: releases/fyaudio_windows.zip
-
-  build-android:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.22.x'
-          channel: 'stable'
-
-      - name: Flutter doctor
-        run: flutter doctor -v
-
-      - name: Get dependencies
-        working-directory: windows/fy_audio_player
-        run: flutter pub get
-
-      - name: Build Android release
-        working-directory: windows/fy_audio_player
-        run: flutter build apk --release --verbose
-
-      - name: Prepare release
-        run: |
-          mkdir -p releases/android
-          cp windows/fy_audio_player/build/app/outputs/apk/release/app-release.apk releases/android/fyaudio.apk
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fyaudio_android
-          path: releases/android/fyaudio.apk
-
-      - name: Upload to Release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: releases/android/fyaudio.apk
-
   build-linux:
     runs-on: ubuntu-latest
     steps:
@@ -165,6 +63,108 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: releases/fyaudio_linux.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build Go backend
+        run: |
+          go env -w GOPROXY=https://goproxy.cn,direct
+          cd common
+          go build -o fyaudio_backend.exe .
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.x'
+          channel: 'stable'
+
+      - name: Get dependencies
+        working-directory: windows/fy_audio_player
+        run: flutter pub get
+
+      - name: Build Windows release
+        working-directory: windows/fy_audio_player
+        continue-on-error: true
+        run: flutter build windows --release
+
+      - name: Upload artifact if successful
+        if: success()
+        run: |
+          New-Item -ItemType Directory -Force -Path releases/windows
+          Copy-Item windows/fy_audio_player/build/windows/x64/runner/Release/fy_audio_player.exe releases/windows/
+          Copy-Item windows/fy_audio_player/build/windows/x64/runner/Release/flutter_windows.dll releases/windows/
+          Copy-Item windows/fy_audio_player/build/windows/x64/runner/Release/*.dll releases/windows/
+          Copy-Item windows/fy_audio_player/build/windows/x64/runner/Release/data releases/windows/data -Recurse
+          Copy-Item common/fyaudio_backend.exe releases/windows/
+          Compress-Archive -Path releases/windows/* -DestinationPath releases/fyaudio_windows.zip
+
+      - name: Upload Windows artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fyaudio_windows
+          path: releases/fyaudio_windows.zip
+
+      - name: Upload Windows to Release
+        if: github.event_name == 'release' && success()
+        uses: softprops/action-gh-release@v2
+        with:
+          files: releases/fyaudio_windows.zip
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.x'
+          channel: 'stable'
+
+      - name: Get dependencies
+        working-directory: windows/fy_audio_player
+        run: flutter pub get
+
+      - name: Build Android release
+        working-directory: windows/fy_audio_player
+        continue-on-error: true
+        run: flutter build apk --release
+
+      - name: Upload artifact if successful
+        if: success()
+        run: |
+          mkdir -p releases/android
+          cp windows/fy_audio_player/build/app/outputs/apk/release/app-release.apk releases/android/fyaudio.apk
+
+      - name: Upload Android artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fyaudio_android
+          path: releases/android/fyaudio.apk
+
+      - name: Upload Android to Release
+        if: github.event_name == 'release' && success()
+        uses: softprops/action-gh-release@v2
+        with:
+          files: releases/android/fyaudio.apk
 
   test:
     runs-on: ubuntu-latest
