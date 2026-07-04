@@ -280,6 +280,7 @@ func (se *SyncEngine) UpdateClockOffset(clientTime, serverTime uint64, rttMs int
 func (se *SyncEngine) Reset() {
 	se.mu.Lock()
 	se.clockOffset = 0
+	se.manualOffsetMs = 0
 	se.estimatedRTT = 50
 	se.isPlaying = false
 	se.latencyIdx = 0

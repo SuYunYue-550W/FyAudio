@@ -50,7 +50,7 @@ class AudioParticlePainter extends CustomPainter {
       final spectrumInfluence =
           spectrum.isNotEmpty ? spectrum[i % spectrum.length] : 0.5;
       final r = p.size * (0.5 + spectrumInfluence * 0.5);
-      final opacity = (0.15 + volume * 0.2) * opacityMultiplier;
+      final opacity = (0.25 + volume * 0.25) * opacityMultiplier;
 
       final paint = Paint()
         ..color = Colors.white.withOpacity(opacity.clamp(0.0, 1.0))

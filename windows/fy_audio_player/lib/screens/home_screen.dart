@@ -119,7 +119,9 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Container(
           decoration: BoxDecoration(
             gradient: LinearGradient(
-              colors: ThemeColorManager.getBgGradient(),
+              colors: ThemeColorManager.getBgGradient()
+                  .map((c) => c.withOpacity(0.78))
+                  .toList(),
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
             ),
@@ -346,11 +348,10 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// 蓝牙连接卡片 - 修复异步 onPressed
+  /// 蓝牙卡片 - 支持扫描、连接、断开
   Widget _buildBluetoothCard(BuildContext context) {
     final bluetooth = context.watch<BluetoothService>();
     final connected = bluetooth.connectedDevice;
-    if (connected == null) return const SizedBox.shrink();
 
     return LiquidGlassCard(
       blurRadius: 14,
@@ -358,61 +359,285 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Container(
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: ThemeColorManager.getPrimaryColor().withOpacity(0.08),
+          color: connected != null
+              ? ThemeColorManager.getPrimaryColor().withOpacity(0.08)
+              : ThemeColorManager.getSurfaceColor(),
           borderRadius: BorderRadius.circular(16),
         ),
-        child: Row(
+        child: Column(
           children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(10),
-                color: ThemeColorManager.getPrimaryColor(),
-              ),
-              child: const Icon(Icons.bluetooth_audio, color: Colors.white),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    connected.name,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      color: ThemeColorManager.getTextColor(),
-                    ),
+            Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(10),
+                    color: connected != null
+                        ? ThemeColorManager.getPrimaryColor()
+                        : ThemeColorManager.getSurfaceColor(),
                   ),
-                  Text(
-                    '蓝牙已连接 · 电量 ${connected.batteryLevel}%',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Color(0xff52c41a),
-                    ),
+                  child: Icon(
+                    connected != null
+                        ? Icons.bluetooth_audio
+                        : Icons.bluetooth_searching,
+                    color: connected != null ? Colors.white : ThemeColorManager.getPrimaryColor(),
+                    size: 20,
                   ),
-                ],
-              ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            connected != null ? connected.name : '蓝牙设备',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                              color: ThemeColorManager.getTextColor(),
+                            ),
+                          ),
+                          if (connected != null)
+                            _buildBadge('已连接', const Color(0xff22c55e)),
+                          if (bluetooth.isScanning)
+                            _buildBadge('扫描中', ThemeColorManager.getPrimaryColor()),
+                        ],
+                      ),
+                      if (connected != null)
+                        Text(
+                          '电量 ${connected.batteryLevel}% · ${connected.address}',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: ThemeColorManager.getSubTextColor(),
+                          ),
+                        ),
+                      if (connected == null && !bluetooth.isScanning)
+                        Text(
+                          '点击扫描查找蓝牙设备',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: ThemeColorManager.getSubTextColor(),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                LiquidGlassButton(
+                  onPressed: connected != null
+                      ? () async {
+                          final messenger = ScaffoldMessenger.of(context);
+                          await bluetooth.disconnect();
+                          if (mounted) {
+                            messenger.showSnackBar(
+                              const SnackBar(
+                                content: Text('已断开蓝牙连接'),
+                                backgroundColor: Colors.grey,
+                                duration: Duration(seconds: 2),
+                              ),
+                            );
+                          }
+                        }
+                      : () {
+                          bluetooth.startScan();
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: const Text('正在扫描蓝牙设备...'),
+                              backgroundColor: ThemeColorManager.getPrimaryColor(),
+                              duration: const Duration(seconds: 2),
+                            ),
+                          );
+                        },
+                  child: Icon(
+                    connected != null ? Icons.bluetooth_disabled : Icons.refresh,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+                ),
+              ],
             ),
-            // 修复：异步 onPressed 用 async 包装
-            LiquidGlassButton(
-              onPressed: () async {
-                await bluetooth.disconnect();
-              },
-              child: const Icon(
-                Icons.bluetooth_disabled,
-                color: Colors.white,
-                size: 18,
-              ),
-            ),
+            const SizedBox(height: 12),
+            if (bluetooth.scannedDevices.isNotEmpty)
+              _buildBluetoothDeviceList(context, bluetooth),
+            if (bluetooth.pairedDevices.isNotEmpty && connected == null)
+              _buildPairedDevicesList(context, bluetooth),
           ],
         ),
       ),
     );
   }
 
+  /// 蓝牙扫描设备列表
+  Widget _buildBluetoothDeviceList(BuildContext context, BluetoothService bluetooth) {
+    return Column(
+      children: [
+        const SizedBox(height: 8),
+        ...bluetooth.scannedDevices.map((device) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(8),
+                      color: ThemeColorManager.getSurfaceColor(),
+                    ),
+                    child: Center(
+                      child: Text(
+                        device.deviceType == BluetoothDeviceType.headphones
+                            ? '🎧'
+                            : device.deviceType == BluetoothDeviceType.speaker
+                                ? '🔊'
+                                : '📱',
+                        style: const TextStyle(fontSize: 16),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          device.name,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            color: ThemeColorManager.getTextColor(),
+                          ),
+                        ),
+                        Text(
+                          '${device.address} · ${device.rssi != null ? '信号 ${device.rssi}dBm' : ''}${device.batteryLevel > 0 ? ' · 电量 ${device.batteryLevel}%' : ''}',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: ThemeColorManager.getSubTextColor(),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  LiquidGlassButton(
+                    onPressed: () async {
+                      final messenger = ScaffoldMessenger.of(context);
+                      final success = await bluetooth.connect(device.address);
+                      if (success && mounted) {
+                        messenger.showSnackBar(
+                          const SnackBar(
+                            content: Text('已连接设备'),
+                            backgroundColor: Color(0xff22c55e),
+                            duration: Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                    },
+                    child: Text(
+                      '连接',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: ThemeColorManager.getTextColor(),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            )),
+      ],
+    );
+  }
+
+  /// 已配对蓝牙设备列表
+  Widget _buildPairedDevicesList(BuildContext context, BluetoothService bluetooth) {
+    return Column(
+      children: [
+        const SizedBox(height: 8),
+        Text(
+          '已配对设备',
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: ThemeColorManager.getSubTextColor(),
+          ),
+        ),
+        const SizedBox(height: 4),
+        ...bluetooth.pairedDevices.map((device) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(8),
+                      color: ThemeColorManager.getSurfaceColor(),
+                    ),
+                    child: Center(
+                      child: Text(
+                        device.deviceType == BluetoothDeviceType.headphones
+                            ? '🎧'
+                            : device.deviceType == BluetoothDeviceType.speaker
+                                ? '🔊'
+                                : '📱',
+                        style: const TextStyle(fontSize: 16),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          device.name,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            color: ThemeColorManager.getTextColor(),
+                          ),
+                        ),
+                        Text(
+                          '${device.address} · 电量 ${device.batteryLevel}%',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: ThemeColorManager.getSubTextColor(),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  LiquidGlassButton(
+                    onPressed: () async {
+                      final messenger = ScaffoldMessenger.of(context);
+                      final success = await bluetooth.connect(device.address);
+                      if (success && mounted) {
+                        messenger.showSnackBar(
+                          const SnackBar(
+                            content: Text('已连接设备'),
+                            backgroundColor: Color(0xff22c55e),
+                            duration: Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                    },
+                    child: Text(
+                      '连接',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: ThemeColorManager.getTextColor(),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            )),
+      ],
+    );
+  }
+
   Widget _buildDeviceListHeader(BuildContext context) {
+    final network = context.read<NetworkService>();
     return Row(
       children: [
         Icon(Icons.devices, size: 18, color: ThemeColorManager.getSubTextColor()),
@@ -424,6 +649,22 @@ class _HomeScreenState extends State<HomeScreen> {
             fontWeight: FontWeight.w600,
             color: ThemeColorManager.getTextColor(),
           ),
+        ),
+        const Spacer(),
+        LiquidGlassButton(
+          onPressed: () {
+            network.sendDiscover();
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: const Text('正在搜索局域网设备...'),
+                  backgroundColor: ThemeColorManager.getPrimaryColor(),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            }
+          },
+          child: const Icon(Icons.refresh, size: 18),
         ),
       ],
     );
@@ -479,9 +720,13 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// 设备卡片 - 显示名称、平台、IP、延迟
+  /// 设备卡片 - 显示名称、平台、IP、延迟，支持连接控制
   Widget _buildDeviceCard(
       BuildContext context, DeviceInfo device, int syncLatency) {
+    final appState = context.read<AppState>();
+    final network = context.read<NetworkService>();
+    final isCurrentSource = appState.isSource;
+
     return LiquidGlassCard(
       blurRadius: 12,
       padding: 0,
@@ -525,19 +770,40 @@ class _HomeScreenState extends State<HomeScreen> {
                         const SizedBox(width: 6),
                         _buildBadge('音源', ThemeColorManager.getPrimaryColor()),
                       ],
+                      if (device.bluetoothConnected) ...[
+                        const SizedBox(width: 6),
+                        _buildBadge('蓝牙', const Color(0xff22c55e)),
+                      ],
                     ],
                   ),
                   const SizedBox(height: 4),
-                  Text(
-                    '${device.platform} · ${device.ip}',
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: ThemeColorManager.getSubTextColor(),
-                    ),
+                  Row(
+                    children: [
+                      Text(
+                        '${device.platform} · ${device.ip}',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: ThemeColorManager.getSubTextColor(),
+                        ),
+                      ),
+                      if (device.capabilities.isNotEmpty) ...[
+                        const SizedBox(width: 4),
+                        const Text('·'),
+                        const SizedBox(width: 4),
+                        Text(
+                          device.capabilities.join(', '),
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: ThemeColorManager.getSubTextColor(),
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ],
               ),
             ),
+            const SizedBox(width: 12),
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
@@ -563,14 +829,27 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  '延迟',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: ThemeColorManager.getSubTextColor(),
+                const SizedBox(height: 6),
+                if (!isCurrentSource && !device.isSource)
+                  LiquidGlassButton(
+                    onPressed: () {
+                      network.sendSetSource(device.deviceId);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('已设置 ${device.deviceName} 为音源'),
+                          backgroundColor: ThemeColorManager.getPrimaryColor(),
+                          duration: const Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                    child: Text(
+                      '设为音源',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: ThemeColorManager.getTextColor(),
+                      ),
+                    ),
                   ),
-                ),
               ],
             ),
           ],
@@ -672,39 +951,141 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// 同步状态指示器
+  /// 同步状态指示器 - 支持点击查看详情和手动同步
   Widget _buildSyncIndicator(BuildContext context) {
     final latency = context.select<AppState, int>((s) => s.syncLatencyMs);
     final bufferFrames =
         context.select<AppState, int>((s) => s.bufferFrames);
     final color = _getLatencyColor(latency);
+    final network = context.read<NetworkService>();
+    final sync = context.read<SyncService>();
 
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(
-            color: color,
-            borderRadius: BorderRadius.circular(99),
-            boxShadow: [
-              BoxShadow(
-                color: color.withOpacity(0.5),
-                blurRadius: 6,
-              ),
-            ],
+    return InkWell(
+      onTap: () => _showSyncDetailsDialog(context),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(99),
+              boxShadow: [
+                BoxShadow(
+                  color: color.withOpacity(0.5),
+                  blurRadius: 6,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '同步中 · 延迟 ${latency}ms · 缓冲 $bufferFrames 帧',
+            style: TextStyle(
+              fontSize: 12,
+              color: ThemeColorManager.getSubTextColor(),
+            ),
+          ),
+          const SizedBox(width: 8),
+          LiquidGlassButton(
+            onPressed: () {
+              network.sendSyncRequest(DateTime.now().millisecondsSinceEpoch);
+              sync.reset();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: const Text('正在重新同步...'),
+                    backgroundColor: ThemeColorManager.getPrimaryColor(),
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
+              }
+            },
+            child: const Icon(Icons.sync, size: 16),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 同步详情对话框
+  void _showSyncDetailsDialog(BuildContext context) {
+    final appState = context.read<AppState>();
+    final stats = context.read<SyncService>().getStats();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.transparent,
+        contentPadding: EdgeInsets.zero,
+        content: LiquidGlassCard(
+          blurRadius: 20,
+          padding: 0,
+          child: Container(
+            padding: const EdgeInsets.all(20),
+            width: 360,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.sync, color: ThemeColorManager.getPrimaryColor()),
+                    const SizedBox(width: 8),
+                    Text(
+                      '同步状态详情',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: ThemeColorManager.getTextColor(),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                _buildStatRow('网络延迟', '${appState.syncLatencyMs} ms', _getLatencyColor(appState.syncLatencyMs)),
+                _buildStatRow('缓冲帧数', '${appState.bufferFrames} 帧', ThemeColorManager.getPrimaryColor()),
+                _buildStatRow('时钟偏移', '${appState.clockOffsetMs} ms', Colors.grey),
+                _buildStatRow('播放状态', stats.isPlaying ? '播放中' : '已暂停', stats.isPlaying ? const Color(0xff22c55e) : Colors.grey),
+                _buildStatRow('丢帧率', '${(stats.dropRate * 100).toStringAsFixed(1)}%', stats.dropRate > 0.1 ? const Color(0xfff97316) : const Color(0xff22c55e)),
+                _buildStatRow('窗口大小', '${stats.windowMs} ms', ThemeColorManager.getPrimaryColor()),
+                const SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    LiquidGlassButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: Text('关闭', style: TextStyle(color: ThemeColorManager.getTextColor())),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
-        const SizedBox(width: 8),
-        Text(
-          '同步中 · 延迟 ${latency}ms · 缓冲 $bufferFrames 帧',
-          style: TextStyle(
-            fontSize: 12,
-            color: ThemeColorManager.getSubTextColor(),
+      ),
+    );
+  }
+
+  /// 统计行组件
+  Widget _buildStatRow(String label, String value, Color valueColor) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(fontSize: 13, color: ThemeColorManager.getSubTextColor()),
+            ),
           ),
-        ),
-      ],
+          Text(
+            value,
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: valueColor),
+          ),
+        ],
+      ),
     );
   }
 

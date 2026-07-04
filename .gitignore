@@ -81,11 +81,8 @@ migrate_working_dir/
 .env
 .env.local
 
-# Large binary files
-releases/fy_audio_player_windows.zip
-releases/windows/data/
-releases/windows/*.dll
-releases/windows/*.exe
-releases/android/*.apk
+# Release builds (distribution artifacts)
+release/
+releases/
 
 common/fy_audio_backend*

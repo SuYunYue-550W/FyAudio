@@ -31,8 +31,8 @@ type DiscoveryService struct {
 	role       string
 	localIP    string
 
-	listener       *net.UDPConn        // 控制消息监听
-	broadcastConns []*net.UDPConn      // 复用的广播发送 socket（每个广播地址一个）
+	listener       *net.UDPConn   // 控制消息监听
+	broadcastConns []*net.UDPConn // 复用的广播发送 socket（每个广播地址一个）
 
 	devices map[string]*Device
 	mu      sync.RWMutex
@@ -280,17 +280,17 @@ func (s *DiscoveryService) refreshHeartbeat(deviceID string) {
 // buildDeviceInfo 构建本机设备信息
 func (s *DiscoveryService) buildDeviceInfo() *protocol.DeviceInfo {
 	return &protocol.DeviceInfo{
-		DeviceID:     s.deviceID,
-		DeviceName:   s.deviceName,
-		Platform:     s.platform,
-		Role:         s.role,
-		IP:           s.localIP,
-		SampleRate:   protocol.SampleRate,
-		Channels:     protocol.Channels,
-		Capabilities: []protocol.Capability{protocol.CapSpeaker, protocol.CapBluetooth},
+		DeviceID:      s.deviceID,
+		DeviceName:    s.deviceName,
+		Platform:      s.platform,
+		Role:          s.role,
+		IP:            s.localIP,
+		SampleRate:    protocol.SampleRate,
+		Channels:      protocol.Channels,
+		Capabilities:  []protocol.Capability{protocol.CapSpeaker, protocol.CapBluetooth},
 		BluetoothConn: false,
-		IsSource:     s.role == protocol.RoleSource,
-		Version:      "1.0.0",
+		IsSource:      s.role == protocol.RoleSource,
+		Version:       "1.0.0",
 	}
 }
 
@@ -615,15 +615,22 @@ func GetBroadcastAddrs() []string {
 	}
 
 	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagBroadcast == 0 {
+		if iface.Flags&net.FlagUp == 0 {
 			continue
 		}
 		ifaceAddrs, _ := iface.Addrs()
 		for _, addr := range ifaceAddrs {
-			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				ip4 := ipnet.IP.To4()
+				if ip4 == nil {
+					continue
+				}
+				if len(ipnet.Mask) != 4 {
+					continue
+				}
 				broadcast := make(net.IP, 4)
 				for i := 0; i < 4; i++ {
-					broadcast[i] = ipnet.IP[i] | ^ipnet.Mask[i]
+					broadcast[i] = ip4[i] | ^ipnet.Mask[i]
 				}
 				result = append(result, broadcast.String())
 			}

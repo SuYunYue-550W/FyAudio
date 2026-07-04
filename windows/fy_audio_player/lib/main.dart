@@ -73,9 +73,9 @@ Future<void> _initDesktopWindow() async {
       await windowManager.ensureInitialized();
 
       // 使用 WindowOptions 对象（不是 Map）
-      final windowOptions = WindowOptions(
-        size: const Size(960, 680),
-        minimumSize: const Size(800, 600),
+      const windowOptions = WindowOptions(
+        size: Size(960, 680),
+        minimumSize: Size(800, 600),
         center: true,
         backgroundColor: Colors.transparent,
         skipTaskbar: false,
