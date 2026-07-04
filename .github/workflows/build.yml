@@ -1,0 +1,194 @@
+name: FyAudio Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ created ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Set up Go proxy
+        run: |
+          go env -w GOPROXY=https://goproxy.cn,direct
+          go env -w GO111MODULE=on
+
+      - name: Build Go backend
+        run: |
+          cd common
+          go build -o fyaudio_backend.exe .
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.x'
+          channel: 'stable'
+
+      - name: Configure Flutter mirrors
+        run: |
+          flutter config --enable-windows-desktop
+          flutter pub get
+
+      - name: Build Windows release
+        run: |
+          flutter build windows --release
+
+      - name: Prepare Windows release
+        run: |
+          New-Item -ItemType Directory -Force -Path releases/windows
+          Copy-Item build/windows/x64/runner/Release/fy_audio_player.exe releases/windows/
+          Copy-Item build/windows/x64/runner/Release/flutter_windows.dll releases/windows/
+          Copy-Item build/windows/x64/runner/Release/*.dll releases/windows/
+          Copy-Item build/windows/x64/runner/Release/data releases/windows/data -Recurse
+          Copy-Item common/fyaudio_backend.exe releases/windows/
+          Compress-Archive -Path releases/windows/* -DestinationPath releases/fyaudio_windows.zip
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fyaudio_windows
+          path: releases/fyaudio_windows.zip
+
+      - name: Upload Windows to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: releases/fyaudio_windows.zip
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.x'
+          channel: 'stable'
+
+      - name: Configure Flutter mirrors
+        run: |
+          flutter config --enable-android
+          flutter pub get
+
+      - name: Build Android release
+        run: |
+          cd windows/fy_audio_player
+          flutter build apk --release
+
+      - name: Prepare Android release
+        run: |
+          mkdir -p releases/android
+          cp windows/fy_audio_player/build/app/outputs/apk/release/app-release.apk releases/android/fyaudio.apk
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fyaudio_android
+          path: releases/android/fyaudio.apk
+
+      - name: Upload Android to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: releases/android/fyaudio.apk
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build Go backend for Linux
+        run: |
+          cd common
+          GOOS=linux GOARCH=amd64 go build -o fyaudio_backend_linux .
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.x'
+          channel: 'stable'
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libx11-dev pkg-config cmake ninja-build libbluetooth-dev
+
+      - name: Build Linux release
+        run: |
+          cd windows/fy_audio_player
+          flutter config --enable-linux-desktop
+          flutter pub get
+          flutter build linux --release
+
+      - name: Prepare Linux release
+        run: |
+          mkdir -p releases/linux
+          cp -r windows/fy_audio_player/build/linux/x64/release/bundle/* releases/linux/
+          cp common/fyaudio_backend_linux releases/linux/
+          cd releases
+          zip -r fyaudio_linux.zip linux/
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fyaudio_linux
+          path: releases/fyaudio_linux.zip
+
+      - name: Upload Linux to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: releases/fyaudio_linux.zip
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Run Go tests
+        run: |
+          cd common
+          go test ./... -v
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.x'
+          channel: 'stable'
+
+      - name: Run Flutter tests
+        run: |
+          cd windows/fy_audio_player
+          flutter test test/widget_test.dart
