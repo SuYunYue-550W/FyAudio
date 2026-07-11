@@ -1,0 +1,19 @@
+[Unit]
+Description=FyAudio Gateway Service
+After=network.target bluetooth.target sound.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+ExecStart=/usr/local/bin/fyaudio-gateway -name "FyAudio Gateway" -role gateway
+WorkingDirectory=/var/lib/fyaudio
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment="LD_LIBRARY_PATH=/usr/local/lib"
+
+[Install]
+WantedBy=multi-user.target
