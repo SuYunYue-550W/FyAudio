@@ -94,7 +94,10 @@ func (m *Manager) listPairedDevices() error {
 		parts := strings.Fields(line)
 		if len(parts) >= 2 {
 			addr := parts[1]
-			name := parts[2] if len(parts) > 2 else "未知设备"
+			name := "未知设备"
+			if len(parts) > 2 {
+				name = parts[2]
+			}
 			m.available[addr] = &Device{Name: name, Address: addr}
 		}
 	}

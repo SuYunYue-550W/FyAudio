@@ -100,8 +100,12 @@ func (m *Manager) Start() error {
 func (m *Manager) Stop() {
 	close(m.stopCh)
 	m.wg.Wait()
-	m.controlConn?.Close()
-	m.audioConn?.Close()
+	if m.controlConn != nil {
+		m.controlConn.Close()
+	}
+	if m.audioConn != nil {
+		m.audioConn.Close()
+	}
 	log.Printf("[Network] 网络已停止")
 }
 
@@ -257,28 +261,44 @@ func (m *Manager) BroadcastOnline() {
 		"is_source":         false,
 	}
 
-	packet := protocol.NewControlPacket(protocol.MsgTypeOnline, device)
-	m.broadcast(packet)
+	packet, _ := protocol.NewControlPacket(protocol.MsgTypeOnline, device)
+	if packet != nil {
+		if data, err := packet.Serialize(); err == nil {
+			m.broadcast(data)
+		}
+	}
 }
 
 func (m *Manager) BroadcastOffline() {
-	packet := protocol.NewControlPacket(protocol.MsgTypeOffline, map[string]interface{}{
+	packet, _ := protocol.NewControlPacket(protocol.MsgTypeOffline, map[string]interface{}{
 		"device_id": m.cfg.GatewayID,
 	})
-	m.broadcast(packet)
+	if packet != nil {
+		if data, err := packet.Serialize(); err == nil {
+			m.broadcast(data)
+		}
+	}
 }
 
 func (m *Manager) Discover() {
-	packet := protocol.NewControlPacket(protocol.MsgTypeDiscover, nil)
-	m.broadcast(packet)
+	packet, _ := protocol.NewControlPacket(protocol.MsgTypeDiscover, nil)
+	if packet != nil {
+		if data, err := packet.Serialize(); err == nil {
+			m.broadcast(data)
+		}
+	}
 }
 
 func (m *Manager) SendHeartbeat() {
-	packet := protocol.NewControlPacket(protocol.MsgTypeHeartbeat, map[string]interface{}{
+	packet, _ := protocol.NewControlPacket(protocol.MsgTypeHeartbeat, map[string]interface{}{
 		"device_id":   m.cfg.GatewayID,
 		"audio_state":  "playing",
 	})
-	m.broadcast(packet)
+	if packet != nil {
+		if data, err := packet.Serialize(); err == nil {
+			m.broadcast(data)
+		}
+	}
 }
 
 func (m *Manager) sendOnlineTo(ip string) {
@@ -292,8 +312,12 @@ func (m *Manager) sendOnlineTo(ip string) {
 		"capabilities":      []string{"speaker", "bluetooth", "gateway"},
 	}
 
-	packet := protocol.NewControlPacket(protocol.MsgTypeOnline, device)
-	m.sendTo(packet, ip, 5002)
+	packet, _ := protocol.NewControlPacket(protocol.MsgTypeOnline, device)
+	if packet != nil {
+		if data, err := packet.Serialize(); err == nil {
+			m.sendTo(data, ip, 5002)
+		}
+	}
 }
 
 func (m *Manager) broadcast(data []byte) {
